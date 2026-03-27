@@ -1,0 +1,83 @@
+
+######## Define Types (model.py)
+
+from dataclasses import dataclass
+from core.env_server import Action, Observation, State
+
+@dataclass
+class YourAction(Action):
+    action_value: int
+    # Add your action fields
+
+@dataclass
+class YourObservation(Observation):
+    state_data: List[float]
+    done: bool
+    reward: float
+    # Add your observation fields
+
+@dataclass
+class YourState(State):
+    episode_id: str
+    step_count: int
+    # Add your state fields
+
+
+####### Implement Environment (server/environment.py)
+
+from core.env_server import Environment
+
+class YourEnvironment(Environment):
+    def reset(self) -> Observation:
+        # Initialize your game/simulation
+        return YourObservation(...)
+    
+    def step(self, action: Action) -> Observation:
+        # Execute action, update state
+        return YourObservation(...)
+    
+    @property
+    def state(self) -> State:
+        return self._state
+
+######## Create Client (Client.py)
+
+from core.http_env_client import HTTPEnvClient
+from core.types import StepResult
+
+class YourEnv(HTTPEnvClient[YourAction, YourObservation]):
+    def _step_payload(self, action: YourAction) -> dict:
+        """Convert action to JSON"""
+        return {"action_value": action.action_value}
+    
+    def _parse_result(self, payload: dict) -> StepResult:
+        """Parse JSON to observation"""
+        return StepResult(
+            observation=YourObservation(...),
+            reward=payload['reward'],
+            done=payload['done']
+        )
+    
+    def _parse_state(self, payload: dict) -> YourState:
+        return YourState(...)
+
+######## Create Server (server/app.py)
+
+from core.env_server import create_fastapi_app
+from .your_environment import YourEnvironment
+
+env = YourEnvironment()
+app = create_fastapi_app(env)
+
+# That's it! OpenEnv creates all endpoints for you.
+
+######## Dockerize (server/DockerFile)
+
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
