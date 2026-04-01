@@ -1,36 +1,41 @@
-from dataclasses import dataclass
 from typing import Literal
-from pydantic import Field
+
 from openenv.core.env_server import Action, Observation, State
+from pydantic import AliasChoices, ConfigDict, Field
 
 
-@dataclass 
 class F1Action(Action):
-    brake: float = Field(ge=0.0, le=1.0)
-    Steering: int = Field([-1, 0, 1])
-    throttle: float = Field(ge=0.0, le=1.0)
-    aero_mode: Literal[0, 1]
-    regen_intensity : float = Field(ge=0.0, le=1.0)
-    energy_deploy_level : float = Field(ge=0.0, le=1.0)
-    battery_status : Literal["REGEN", "NEUTRAL", "DEPLOY"] = Field(["REGEN", "NEUTRAL", "DEPLOY"])
+    model_config = ConfigDict(populate_by_name=True)
 
-@dataclass
+    brake: float = Field(default=0.0, ge=0.0, le=1.0)
+    steering: float = Field(
+        default=0.0,
+        ge=-1.0,
+        le=1.0,
+        validation_alias=AliasChoices("steering", "Steering"),
+    )
+    throttle: float = Field(default=0.0, ge=0.0, le=1.0)
+    aero_mode: Literal[0, 1] = 0
+    regen_intensity: float = Field(default=0.0, ge=0.0, le=1.0)
+    deploy_level: float = Field(default=0.0, ge=0.0, le=1.0)
+    battery_status: Literal["REGEN", "NEUTRAL", "DEPLOY"] = "NEUTRAL"
+
 class F1Observation(Observation):
-    speed : float
-    curvature_ahead : float
-    battery_state_of_charge : float
-    segment_progress : float
-    tire_wear : float
-    position_along_lap : tuple
-    aero_mode : Literal[0, 1]
+    speed: float = Field(default=0.0, ge=0.0)
+    curvature_ahead: float = Field(default=0.0, ge=0.0)
+    battery_state_of_charge: float = Field(default=0.8, ge=0.0, le=1.0)
+    segment_progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    tire_wear: float = Field(default=0.0, ge=0.0, le=1.0)
+    position_along_lap: tuple[float, float] = (0.0, 0.0)
+    aero_mode: Literal[0, 1] = 0
 
-@dataclass
+
 class F1State(State):
-    speed : float
-    curvature_ahead : float
-    segment_progress : float
-    position_along_lap : tuple
-    battery_state_of_charge : float = Field(ge=0.0, le=8.5)
-    tire_wear : float = Field(ge=0.0, le=1.0)
-    aero_mode : Literal[0, 1]
-    remaining_lap : float
+    speed: float = Field(default=0.0, ge=0.0)
+    curvature_ahead: float = Field(default=0.0, ge=0.0)
+    segment_progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    position_along_lap: tuple[float, float] = (0.0, 0.0)
+    battery_state_of_charge: float = Field(default=0.8, ge=0.0, le=1.0)
+    tire_wear: float = Field(default=0.0, ge=0.0, le=1.0)
+    aero_mode: Literal[0, 1] = 0
+    remaining_lap: float = Field(default=0.0, ge=0.0)
