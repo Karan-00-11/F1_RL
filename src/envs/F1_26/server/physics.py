@@ -154,7 +154,7 @@ def update_speed(
     ) -> tuple[float, float]:
 
     f_brake = brake_force(brake=brake, velocity=velocity, mode=mode, mu=mu)
-    f_drag = aero_efficiency(velocity, mode=1)
+    f_drag = aero_efficiency(velocity, mode=mode)
 
     # Avoid simultaneous deploy and braking in the same step.
     deploy_throttle = float(np.clip(throttle, 0.0, 1.0)) if brake <= 1e-6 else 0.0

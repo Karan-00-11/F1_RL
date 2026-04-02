@@ -15,7 +15,6 @@ class F1Action(Action):
         validation_alias=AliasChoices("steering", "Steering"),
     )
     throttle: float = Field(default=0.0, ge=0.0, le=1.0)
-    aero_mode: Literal[0, 1] = 0
     regen_intensity: float = Field(default=0.0, ge=0.0, le=1.0)
     deploy_level: float = Field(default=0.0, ge=0.0, le=1.0)
     battery_status: Literal["REGEN", "NEUTRAL", "DEPLOY"] = "NEUTRAL"
