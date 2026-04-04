@@ -65,7 +65,17 @@ class RewardFunction:
     def _sigmoid(z: float, k: float) -> float:
         return float(1.0 / (1.0 + np.exp(-k * z)))
 
+    @staticmethod
+    def _clamp(x: float, lo: float, hi: float) -> float:
+        return float(max(lo, min(hi, x)))
+
     def _phase_weights(self) -> Dict[str, float]:
+        """
+        Soft phase gating.
+
+        The phase weights are mostly driven by track/vehicle state.
+        Energy is handled as a small contextual modifier instead of a dominant phase.
+        """
         v_ratio = self.velocity_after / max(self.v_max_seg, 1e-3)
         ay_ratio = self.ay_demand / max(self.ay_limit, 1e-3)
         acceleration = self.velocity_after - self.velocity_before
@@ -83,16 +93,17 @@ class RewardFunction:
         raw_exit = g_curve * g_throttle * g_accel * (1.0 - g_brake)
 
         raw = np.array([raw_straight, raw_entry, raw_corner, raw_exit], dtype=float) + 1e-6
-        tau = 0.5
+        tau = 0.8
         scaled_raw = raw / max(tau, 1e-6)
         scaled_raw -= np.max(scaled_raw)
         logits = np.exp(scaled_raw)
         phase_w = logits / np.sum(logits)
 
+        # Energy opportunity is intentionally capped; it should never dominate the phase logic.
         deploy_opportunity = (1.0 - g_curve) * g_throttle * (1.0 - g_brake)
         regen_opportunity = g_brake * (1.0 - g_throttle) * (0.35 + 0.65 * g_curve)
-        energy_mix = 0.45 * deploy_opportunity + 0.55 * regen_opportunity
-        w_energy = float(0.10 + 0.10 * self._sigmoid(energy_mix - 0.25, 8.0))
+        energy_mix = 0.55 * deploy_opportunity + 0.45 * regen_opportunity
+        w_energy = self._clamp(0.08 + 0.08 * self._sigmoid(energy_mix - 0.25, 8.0), 0.08, 0.16)
 
         phase_scale = 1.0 - w_energy
         return {
@@ -100,8 +111,55 @@ class RewardFunction:
             "entry": float(phase_w[1] * phase_scale),
             "corner": float(phase_w[2] * phase_scale),
             "exit": float(phase_w[3] * phase_scale),
-            "energy": w_energy,
+            "energy": float(w_energy),
         }
+
+    def _energy_reward(self, progress_ratio: float, lap_complete: bool) -> float:
+        """
+        Contextual energy strategy reward.
+
+        Goals:
+        - reward energy deployment only when it actually helps acceleration/progress,
+        - reward regeneration only when braking or lift-off makes it meaningful,
+        - discourage using the battery in the wrong phase,
+        - discourage finishing the lap with large unused charge.
+        """
+        energy_used = max(self.soc_before - self.soc_after, 1e-6)
+        progress_norm = self.ds / max(self.target_seg_len, 1e-6)
+        speed_gain = max(0.0, self.velocity_after - self.velocity_before)
+
+        # Efficiency: progress earned per unit energy spent.
+        # Clamp to keep the scale bounded and stable.
+        efficiency = self._clamp(progress_norm / max(energy_used, 1e-3), 0.0, 5.0)
+        r_eff = 0.20 * efficiency
+
+        deploy_context = (self.throttle_eff > 0.55) and (self.curvature < 0.02)
+        regen_context = (self.brake_eff > 0.15) or (self.throttle_eff < 0.10)
+
+        r_deploy = 0.0
+        if self.battery_status == "DEPLOY" and deploy_context:
+            r_deploy = 0.50 * self.deploy_level * speed_gain
+
+        r_regen = 0.0
+        if self.battery_status == "REGEN" and regen_context:
+            r_regen = 0.30 * self.regen_intensity * self.brake_eff
+
+        r_bad_deploy = 0.0
+        if self.battery_status == "DEPLOY" and (self.curvature > 0.02 or self.brake_eff > 0.10):
+            r_bad_deploy = -0.40 * self.deploy_level
+
+        r_bad_regen = 0.0
+        if self.battery_status == "REGEN" and self.throttle_eff > 0.40:
+            r_bad_regen = -0.20 * self.regen_intensity
+
+        r_unused = 0.0
+        if lap_complete:
+            r_unused = -0.60 * max(self.soc_after, 0.0)
+
+        # Small progress-sensitive encouragement to use energy only when the lap is still open.
+        r_strategy = 0.10 * progress_ratio * (r_deploy + r_regen)
+
+        return float(r_eff + r_deploy + r_regen + r_bad_deploy + r_bad_regen + r_unused + r_strategy)
 
     def compute(self) -> Tuple[float, Dict[str, float]]:
         weights = self._phase_weights()
@@ -126,24 +184,34 @@ class RewardFunction:
         r_corner = -1.2 * over_lateral - 0.2 * abs(self.slip_angle_rad)
         r_exit = 0.8 * max(0.0, accel) * self.throttle_eff - 0.4 * max(0.0, v_ratio - 1.0)
 
-        target_soc = float(np.clip(0.80 - 0.60 * progress_ratio, 0.20, 0.80))
-        soc_track = -abs(self.soc_after - target_soc)
-
-        regen_context = (self.brake_eff > 0.15) or (self.throttle_eff < 0.10)
-        deploy_context = (self.throttle_eff > 0.55) and (self.curvature < 0.01)
-
-        regen_bonus = 0.03 * self.regen_intensity if (self.battery_status == "REGEN" and regen_context) else 0.0
-        deploy_bonus = 0.03 * self.deploy_level if (self.battery_status == "DEPLOY" and deploy_context) else 0.0
-        r_energy = soc_track + regen_bonus + deploy_bonus
+        r_energy = self._energy_reward(progress_ratio=progress_ratio, lap_complete=lap_complete)
 
         overlap_penalty = -0.20 * min(self.throttle_eff, self.brake_eff)
         wear_penalty = -0.05 * self.tire_wear
         slip_penalty = -0.03 * abs(self.slip_ratio)
         speed_penalty = -0.02 * over_speed
+        steer_smooth_penalty = -0.03 * abs(self.steering_cmd) * max(0.0, v_ratio - 0.8)
 
-        phase_reward = (weights["straight"] * r_straight + weights["entry"] * r_entry + weights["corner"] * r_corner + weights["exit"] * r_exit + weights["energy"] * r_energy)
+        phase_reward = (
+            weights["straight"] * r_straight
+            + weights["entry"] * r_entry
+            + weights["corner"] * r_corner
+            + weights["exit"] * r_exit
+            + weights["energy"] * r_energy
+        )
 
-        total_reward = float(progress_reward + time_penalty + phase_reward + speed_penalty + overlap_penalty + wear_penalty + slip_penalty + terminal_bonus + timeout_penalty)
+        total_reward = float(
+            progress_reward
+            + time_penalty
+            + phase_reward
+            + speed_penalty
+            + overlap_penalty
+            + wear_penalty
+            + slip_penalty
+            + steer_smooth_penalty
+            + terminal_bonus
+            + timeout_penalty
+        )
 
         breakdown = {
             "progress_reward": float(progress_reward),
@@ -153,6 +221,7 @@ class RewardFunction:
             "overlap_penalty": float(overlap_penalty),
             "wear_penalty": float(wear_penalty),
             "slip_penalty": float(slip_penalty),
+            "steer_smooth_penalty": float(steer_smooth_penalty),
             "terminal_bonus": float(terminal_bonus),
             "timeout_penalty": float(timeout_penalty),
             "w_straight": float(weights["straight"]),
