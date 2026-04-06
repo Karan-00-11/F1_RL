@@ -100,7 +100,7 @@ class F1Env(Environment):
         self._done = False
         self._last_reward_breakdown = {}
 
-        self._state = self.state()
+        self._state = self._build_state()
 
     def reset(self) -> F1Observation:
         self._episode_id = str(uuid4())
@@ -261,7 +261,7 @@ class F1Env(Environment):
         self.slip_angle_rad = slip_angle_rad
         self.steering = steering_cmd
         self._last_reward_breakdown = breakdown
-        self._state = self.state()
+        self._state = self._build_state()
 
         return self._get_observation(
             reward=reward,
@@ -276,8 +276,11 @@ class F1Env(Environment):
                 "reward_breakdown": breakdown,
             },
         )
-
+    @property
     def state(self) -> F1State:
+        return self._build_state()
+
+    def _build_state(self) -> F1State:  
         progress_m = float(getattr(self, "_progress_m", self.progress_m))
         total_length_m = float(getattr(self, "_total_length_m", getattr(self, "_total_length", 0.0)))
 

@@ -81,3 +81,24 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ # To integrate into OpenEnv repo:
+  # 1. Copy this directory to <repo_root>/envs/F1_RL_env
+  # 2. Build from repo root: docker build -t F1_RL_env:latest -f envs/F1_RL_env/server/Dockerfile .
+  # 3. Run your image: docker run -p 8000:8000 F1_RL_env:latest
