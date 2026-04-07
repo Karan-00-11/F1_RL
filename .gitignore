@@ -1,3 +1,6 @@
 RL/
 __pycache__/
-F1_RL/
+src/
+.venv/
+.env
+*.egg-info
