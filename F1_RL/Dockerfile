@@ -22,7 +22,7 @@ RUN apt-get update && \
 
 # Build argument to control whether we're building standalone or in-repo
 ARG BUILD_MODE=in-repo
-ARG ENV_NAME=F1_RL
+ARG ENV_NAME=openenv-f1-rl
 
 # Copy environment code (always at root of build context)
 COPY . /app/env
@@ -30,6 +30,10 @@ COPY . /app/env
 # For in-repo builds, openenv is already vendored in the build context
 # For standalone builds, openenv will be installed via pyproject.toml
 WORKDIR /app/env
+
+# The build context may contain a host-created virtualenv (e.g., Windows .venv).
+# Remove it so uv can create a valid Linux virtual environment.
+RUN rm -rf /app/env/.venv
 
 # Ensure uv is available (for local builds where base image lacks it)
 RUN if ! command -v uv >/dev/null 2>&1; then \

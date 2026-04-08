@@ -87,10 +87,11 @@ class RewardFunction:
         g_limit = self._sigmoid(ay_ratio - 0.85, 10.0)
         g_overspeed = self._sigmoid(v_ratio - 0.95, 10.0)
 
-        raw_straight = (1.0 - g_curve) * (1.0 - g_brake)
-        raw_entry = g_curve * g_brake * (0.6 + 0.4 * g_overspeed)
-        raw_corner = g_curve * g_limit * (1.0 - 0.3 * g_throttle)
-        raw_exit = g_curve * g_throttle * g_accel * (1.0 - g_brake)
+        # When lateral demand approaches/exceeds limit, reduce straight/exit dominance.
+        raw_straight = (1.0 - g_curve) * (1.0 - g_brake) * (1.0 - 0.70 * g_limit)
+        raw_entry = g_curve * g_brake * (0.6 + 0.4 * g_overspeed) * (0.7 + 0.3 * g_limit)
+        raw_corner = g_curve * g_limit * (1.0 - 0.15 * g_throttle)
+        raw_exit = g_curve * g_throttle * g_accel * (1.0 - g_brake) * (1.0 - 0.85 * g_limit)
 
         raw = np.array([raw_straight, raw_entry, raw_corner, raw_exit], dtype=float) + 1e-6
         tau = 0.8
@@ -181,10 +182,20 @@ class RewardFunction:
 
         r_straight = 0.6 * min(v_ratio, 1.0) - 0.4 * max(0.0, v_ratio - 1.0)
         r_entry = 0.8 * self.brake_eff * max(0.0, v_ratio - 0.9) - 0.3 * self.throttle_eff
-        r_corner = -1.2 * over_lateral - 0.2 * abs(self.slip_angle_rad)
+        r_corner = -1.8 * over_lateral - 0.25 * abs(self.slip_angle_rad)
         r_exit = 0.8 * max(0.0, accel) * self.throttle_eff - 0.4 * max(0.0, v_ratio - 1.0)
 
         r_energy = self._energy_reward(progress_ratio=progress_ratio, lap_complete=lap_complete)
+
+        # Explicit corner control shaping: require brake and steering magnitude in high-demand corners.
+        corner_factor = self._sigmoid(self.curvature - 0.006, 25.0)
+        brake_need = self._clamp(0.20 + 0.40 * min(ay_ratio, 3.0), 0.0, 1.0) * corner_factor
+        steer_need = self._clamp(0.10 + 0.20 * min(ay_ratio, 3.0), 0.0, 0.9) * corner_factor
+
+        brake_deficit = max(0.0, brake_need - self.brake_eff)
+        steer_deficit = max(0.0, steer_need - abs(self.steering_cmd))
+        corner_control_penalty = -0.90 * brake_deficit - 0.45 * steer_deficit
+        corner_control_bonus = 0.35 * min(self.brake_eff, brake_need) + 0.20 * min(abs(self.steering_cmd), steer_need)
 
         overlap_penalty = -0.20 * min(self.throttle_eff, self.brake_eff)
         wear_penalty = -0.05 * self.tire_wear
@@ -209,6 +220,8 @@ class RewardFunction:
             + wear_penalty
             + slip_penalty
             + steer_smooth_penalty
+            + corner_control_penalty
+            + corner_control_bonus
             + terminal_bonus
             + timeout_penalty
         )
@@ -222,6 +235,12 @@ class RewardFunction:
             "wear_penalty": float(wear_penalty),
             "slip_penalty": float(slip_penalty),
             "steer_smooth_penalty": float(steer_smooth_penalty),
+            "corner_control_penalty": float(corner_control_penalty),
+            "corner_control_bonus": float(corner_control_bonus),
+            "brake_need": float(brake_need),
+            "steer_need": float(steer_need),
+            "brake_deficit": float(brake_deficit),
+            "steer_deficit": float(steer_deficit),
             "terminal_bonus": float(terminal_bonus),
             "timeout_penalty": float(timeout_penalty),
             "w_straight": float(weights["straight"]),

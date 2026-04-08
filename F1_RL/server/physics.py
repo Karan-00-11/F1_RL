@@ -150,33 +150,47 @@ def update_speed(
         mu: float,
         soc: float,
         mode: int = 0,
+        battery_status: str = "NEUTRAL",
         dt: float = 0.0125
     ) -> tuple[float, float]:
+
+    battery_status = str(battery_status).upper()
+    if battery_status not in {"DEPLOY", "REGEN", "NEUTRAL"}:
+        battery_status = "NEUTRAL"
 
     f_brake = brake_force(brake=brake, velocity=velocity, mode=mode, mu=mu)
     f_drag = aero_efficiency(velocity, mode=mode)
 
-    # Avoid simultaneous deploy and braking in the same step.
-    deploy_throttle = float(np.clip(throttle, 0.0, 1.0)) if brake <= 1e-6 else 0.0
-    soc, f_deploy = battery_deploy(
-        soc=soc,
-        velocity=velocity,
-        throttle=deploy_throttle,
-        mu=mu,
-        mode=mode,
-        dt=dt,
-    )
+    f_deploy = 0.0
+    f_regen_lift = 0.0
 
-    # Brake regen is energy bookkeeping; lift-off regen adds mild decel.
-    soc, f_regen_lift = battery_recover(
-        velocity=velocity,
-        throttle=throttle,
-        brake_force_n=f_brake,
-        mu=mu,
-        mode=mode,
-        soc=soc,
-        dt=dt,
-    )
+    # DEPLOY: force deploy only. REGEN: force regen only. NEUTRAL: allow both.
+    can_deploy = battery_status in {"DEPLOY", "NEUTRAL"}
+    can_regen = battery_status in {"REGEN", "NEUTRAL"}
+
+    if can_deploy:
+        # Avoid simultaneous deploy and braking in the same step.
+        deploy_throttle = float(np.clip(throttle, 0.0, 1.0)) if brake <= 1e-6 else 0.0
+        soc, f_deploy = battery_deploy(
+            soc=soc,
+            velocity=velocity,
+            throttle=deploy_throttle,
+            mu=mu,
+            mode=mode,
+            dt=dt,
+        )
+
+    if can_regen:
+        # Brake regen is energy bookkeeping; lift-off regen adds mild decel.
+        soc, f_regen_lift = battery_recover(
+            velocity=velocity,
+            throttle=throttle,
+            brake_force_n=f_brake,
+            mu=mu,
+            mode=mode,
+            soc=soc,
+            dt=dt,
+        )
 
     f_net = (f_deploy - f_brake - f_drag - f_regen_lift)
     a_net = f_net / MASS

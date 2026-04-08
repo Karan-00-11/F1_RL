@@ -53,12 +53,12 @@ class F1RlEnvironment(Environment):
 
     def __init__(
         self,
-        target_seg_len: int = 50,
+        target_seg_len: int = 100,
         kappa_straight: float = 0.007,
         ay_max: float = 30.0,
         hs_speed_mps: float = 50.0,
         curv_percentile: int = 90,
-        dt: float = 0.0125,
+        dt: float = 0.5,
         initial_soc: float = 1.0,
         initial_velocity: float = 0.0,
         initial_tire_temp: float = 80.0,
@@ -133,6 +133,9 @@ class F1RlEnvironment(Environment):
         self.slip_ratio = 0.0
         self.slip_angle_rad = 0.0
         self.steering = 0.0
+        self.track_half_width_m = 6.0
+        self.lateral_offset_gain = 0.10
+        self.lateral_offset_m = 0.0
 
         self._segment_idx = 0
         self.progress_m = 0.0
@@ -167,6 +170,7 @@ class F1RlEnvironment(Environment):
         self.mu = self.base_mu
         self.tire_temp = self.initial_tire_temp
         self.aero_mode = int(self.segments[0].get("aero_mode", 0))
+        self.lateral_offset_m = 0.0
 
         # self._state = State(episode_id=str(uuid4()), step_count=0)
         self._state = self._build_state()
@@ -223,6 +227,7 @@ class F1RlEnvironment(Environment):
             mode=self.aero_mode,
             brake=brake_eff,
             mu=self.mu,
+            battery_status=battery_status,
             dt=self.dt,
         )
 
@@ -265,6 +270,15 @@ class F1RlEnvironment(Environment):
         self._progress_m = self.progress_m
         self._segment_idx = self._find_segment_idx(self.progress_m)
 
+        lateral_step = steering_cmd * velocity_after * self.dt * self.lateral_offset_gain
+        self.lateral_offset_m = float(
+            np.clip(
+                self.lateral_offset_m + lateral_step,
+                -self.track_half_width_m,
+                self.track_half_width_m,
+            )
+        )
+
         segment = self.segments[self._segment_idx]
         self.aero_mode = int(segment.get("aero_mode", 0))
         curvature = float(max(0.0, segment.get("curvature_pctl", 0.0)))
@@ -274,7 +288,6 @@ class F1RlEnvironment(Environment):
         ay_limit = float(
             lateral_acceleration_limit(
                 velocity=velocity_after,
-                mode=self.aero_mode,
                 slip_ratio=slip_ratio,
                 slip_angle_rad=slip_angle_rad,
                 temp=self.tire_temp,
@@ -334,6 +347,9 @@ class F1RlEnvironment(Environment):
                 "vmax_segment_mps": float(vmax_seg),
                 "lateral_accel_demand": float(ay_demand),
                 "lateral_accel_limit": float(ay_limit),
+                "steering_input": float(steering_cmd),
+                "turn_direction": self._steering_to_turn_label(steering_cmd),
+                "lateral_offset_m": float(self.lateral_offset_m),
                 "lap_complete": bool(lap_complete),
                 "reward_breakdown": breakdown,
             },
@@ -358,6 +374,7 @@ class F1RlEnvironment(Environment):
                 episode_id=str(self._episode_id or ""),
                 step_count=int(self._step_count),
                 speed=float(self.velocity),
+                speed_kmh=float(self.velocity * 3.6),
                 curvature_ahead=0.0,
                 segment_progress=0.0,
                 position_along_lap=(0.0, 0.0),
@@ -374,14 +391,23 @@ class F1RlEnvironment(Environment):
             episode_id=str(self._episode_id or ""),
             step_count=int(self._step_count),
             speed=float(self.velocity),
+            speed_kmh=float(self.velocity * 3.6),
             curvature_ahead=float(max(0.0, segment.get("curvature_pctl", 0.0))),
             segment_progress=self._segment_progress(segment_idx, progress_m),
-            position_along_lap=self._position_from_progress(progress_m),
+            position_along_lap=self._position_from_progress(progress_m, self.lateral_offset_m),
             battery_state_of_charge=float(np.clip(self.soc, 0.0, 1.0)),
             tire_wear=float(np.clip(self.tire_wear, 0.0, 1.0)),
             aero_mode=int(np.clip(self.aero_mode, 0, 1)),
             remaining_lap=float(max(0.0, total_length_m - progress_m)),
         )
+
+    @staticmethod
+    def _steering_to_turn_label(steering_cmd: float) -> str:
+        if steering_cmd > 1e-6:
+            return "right"
+        if steering_cmd < -1e-6:
+            return "left"
+        return "straight"
 
     def _energy_strategy(
         self,
@@ -392,7 +418,9 @@ class F1RlEnvironment(Environment):
         regen_intensity: float,
     ) -> tuple[float, float]:
         if battery_status == "DEPLOY":
-            throttle *= 0.90 + 0.50 * deploy_level
+            # Keep deploy scaling <= 1.0 so high-throttle commands do not all clip to 1.0.
+            deploy_scale = 0.70 + 0.30 * float(np.clip(deploy_level, 0.0, 1.0))
+            throttle *= deploy_scale
             brake = 0.0
         elif battery_status == "REGEN":
             throttle *= 1.0 - 0.60 * regen_intensity
@@ -414,24 +442,49 @@ class F1RlEnvironment(Environment):
         span = max(end_m - start_m, 1e-6)
         return float(np.clip((progress_m - start_m) / span, 0.0, 1.0))
 
-    def _position_from_progress(self, progress_m: float) -> tuple[float, float]:
-        if progress_m <= 0.0:
+    def _position_from_progress(
+        self,
+        progress_m: float,
+        lateral_offset_m: float = 0.0,
+    ) -> tuple[float, float]:
+        if len(self.x) == 1:
             return float(self.x[0]), float(self.y[0])
-        if progress_m >= self._total_length_m:
-            return float(self.x[-1]), float(self.y[-1])
 
-        idx = int(np.searchsorted(self._cum_dist, progress_m, side="right") - 1)
-        idx = int(np.clip(idx, 0, len(self._cum_dist) - 2))
-        next_idx = idx + 1
+        if progress_m <= 0.0:
+            idx = 0
+            next_idx = 1
+            alpha = 0.0
+        elif progress_m >= self._total_length_m:
+            idx = len(self.x) - 2
+            next_idx = len(self.x) - 1
+            alpha = 1.0
+        else:
+            idx = int(np.searchsorted(self._cum_dist, progress_m, side="right") - 1)
+            idx = int(np.clip(idx, 0, len(self._cum_dist) - 2))
+            next_idx = idx + 1
 
-        d_0 = float(self._cum_dist[idx])
-        d_1 = float(self._cum_dist[next_idx])
-        alpha = (progress_m - d_0) / max(d_1 - d_0, 1e-6)
+            d_0 = float(self._cum_dist[idx])
+            d_1 = float(self._cum_dist[next_idx])
+            alpha = (progress_m - d_0) / max(d_1 - d_0, 1e-6)
 
-        x = float((1.0 - alpha) * self.x[idx] + alpha * self.x[next_idx])
-        y = float((1.0 - alpha) * self.y[idx] + alpha * self.y[next_idx])
+        center_x = float((1.0 - alpha) * self.x[idx] + alpha * self.x[next_idx])
+        center_y = float((1.0 - alpha) * self.y[idx] + alpha * self.y[next_idx])
 
-        return (x, y)
+        if abs(lateral_offset_m) <= 1e-9:
+            return center_x, center_y
+
+        tangent_x = float(self.x[next_idx] - self.x[idx])
+        tangent_y = float(self.y[next_idx] - self.y[idx])
+        tangent_norm = float(np.hypot(tangent_x, tangent_y))
+        if tangent_norm <= 1e-9:
+            return center_x, center_y
+
+        right_normal_x = tangent_y / tangent_norm
+        right_normal_y = -tangent_x / tangent_norm
+
+        x = center_x + float(lateral_offset_m) * right_normal_x
+        y = center_y + float(lateral_offset_m) * right_normal_y
+        return float(x), float(y)
 
     def _get_observation(
         self,
@@ -442,11 +495,12 @@ class F1RlEnvironment(Environment):
         segment = self.segments[self._segment_idx]
         return F1Observation(
             speed=float(self.velocity),
+            speed_kmh=float(self.velocity * 3.6),
             curvature_ahead=float(max(0.0, segment.get("curvature_pctl", 0.0))),
             battery_state_of_charge=float(self.soc),
             segment_progress=self._segment_progress(self._segment_idx, self._progress_m),
             tire_wear=float(self.tire_wear),
-            position_along_lap=self._position_from_progress(self._progress_m),
+            position_along_lap=self._position_from_progress(self._progress_m, self.lateral_offset_m),
             aero_mode=int(self.aero_mode),
             reward=float(reward),
             done=bool(done),

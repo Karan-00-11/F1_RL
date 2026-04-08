@@ -6,11 +6,11 @@
 
 """F1 Rl Environment."""
 
-from .client import F1EnvClient
-from .models import F1Action, F1Observation
+from client import F1EnvClient
+from models import F1Actions, F1Observation
 
 __all__ = [
-    "F1Action",
+    "F1Actions",
     "F1Observation",
     "F1EnvClient",
 ]

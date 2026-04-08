@@ -103,7 +103,7 @@ from typing import Any, Dict
 
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
-from .models import F1Actions, F1Observation, F1State
+from models import F1Actions, F1Observation, F1State
 # If your package uses models.py, change .model to .models
 
 class F1EnvClient(EnvClient[F1Actions, F1Observation, F1State]):
@@ -131,7 +131,4 @@ class F1EnvClient(EnvClient[F1Actions, F1Observation, F1State]):
         )
 
     def _parse_state(self, payload: Dict[str, Any]) -> F1State:
-        return F1State(
-            episode_id=payload.get("episode_id"),
-            step_count=payload.get("step_count", 0),
-        )
+        return F1State.model_validate(payload)

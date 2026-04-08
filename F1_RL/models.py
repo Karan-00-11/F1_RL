@@ -33,7 +33,8 @@ class F1Actions(Action):
 
 class F1Observation(Observation):
     speed: float = Field(default=0.0, ge=0.0)
-    curvature_ahead: float = Field(default=0.0, ge=0.0)
+    speed_kmh: float = Field(default=0.0, ge=0.0)
+    curvature_ahead: float = Field(default=0.0)
     battery_state_of_charge: float = Field(default=0.8, ge=0.0, le=1.0)
     segment_progress: float = Field(default=0.0, ge=0.0, le=1.0)
     tire_wear: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -46,7 +47,8 @@ class F1State(State):
     episode_id: str
     step_count: int
     speed: float = Field(default=0.0, ge=0.0)
-    curvature_ahead: float = Field(default=0.0, ge=0.0)
+    speed_kmh: float = Field(default=0.0, ge=0.0)
+    curvature_ahead: float = Field(default=0.0)
     segment_progress: float = Field(default=0.0, ge=0.0, le=1.0)
     position_along_lap: tuple[float, float] = (0.0, 0.0)
     battery_state_of_charge: float = Field(default=0.8, ge=0.0, le=1.0)
