@@ -1,6 +1,6 @@
 RL/
 __pycache__/
-src/
+src/envs/F1_26
 .venv/
 .env
 *.egg-info
