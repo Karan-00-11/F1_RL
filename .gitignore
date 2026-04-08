@@ -4,3 +4,4 @@ src/envs/F1_26
 .venv/
 .env
 *.egg-info
+F1_RL/README.md
