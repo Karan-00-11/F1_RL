@@ -1,81 +1,138 @@
 # F1 RL Track Simulation Project
 
 ## Overview
-This project aims to build a reinforcement learning environment for an F1-style car using real track geometry and simplified vehicle physics.
+This repository contains an OpenEnv-compatible F1-style reinforcement learning environment built around real track geometry and simplified physics.
 
-The goal is to study how an agent can learn:
-- where to deploy electrical energy,
-- where to recharge energy,
-- how to switch aero modes,
-- and how to optimize lap performance under regulation-like constraints.
+The core environment package is in `F1_RL/`, with the server in `F1_RL/server/` and action/observation models in `F1_RL/models.py`.
 
-## Project Idea
-Instead of building a full F1 simulator, this project focuses on a reduced but realistic environment that includes:
+## Environment Description
+The environment models a single-car lap strategy problem with:
 
-- longitudinal speed dynamics
-- cornering losses
-- tire degradation
-- battery state of charge
-- energy recovery under braking, lift-off, and coasting
-- energy boost deployment
-- aero mode switching
-- real-life track representation using GPS or track layout data
+- Segment-based track representation from Melbourne track data
+- Longitudinal speed update with drag, braking, deploy, and regen
+- Lateral grip limits based on curvature, slip, tire state, and aero effects
+- Tire wear and tire temperature evolution
+- Battery state-of-charge management through deploy/regen modes
+- Reward shaping for progress, corner control, energy strategy, and completion
 
-## Why This Project
-Formula 1 is a real-world control problem with strong constraints and trade-offs.  
-This makes it a good use case for reinforcement learning, especially for:
+The environment server exposes OpenEnv endpoints:
 
-- qualifying lap optimization
-- race strategy planning
-- energy management
-- regulation-aware decision making
+- `POST /reset`
+- `POST /step`
+- `GET /state`
+- `GET /schema`
+- `WS /ws`
 
-## Scope
-The first version of the project will focus on:
+## Action Space (`F1Actions`)
 
-1. Building a track representation from GPS or track data
-2. Splitting the lap into segments
-3. Simulating simplified vehicle physics
-4. Defining an RL environment
-5. Training an agent to optimize lap strategy
+- `throttle`: float in `[0.0, 1.0]`
+- `brake`: float in `[0.0, 1.0]`
+- `steering`: float in `[-1.0, 1.0]`
+- `regen_intensity`: float in `[0.0, 1.0]`
+- `deploy_level`: float in `[0.0, 1.0]`
+- `battery_status`: one of `REGEN`, `NEUTRAL`, `DEPLOY`
 
-## Planned Features
-- Real track centerline representation
-- Segment-based track processing
-- Physics-based lap simulation
-- Reward function for lap time and energy efficiency
-- Qualifying trim benchmark
-- Optional race trim extension
+## Observation Space (`F1Observation`)
 
-## Tech Stack
-- Python
-- OpenEnv
+- `speed`: m/s, `>= 0`
+- `speed_kmh`: km/h, `>= 0`
+- `curvature_ahead`: track curvature signal
+- `battery_state_of_charge`: float in `[0.0, 1.0]`
+- `segment_progress`: float in `[0.0, 1.0]`
+- `tire_wear`: float in `[0.0, 1.0]`
+- `position_along_lap`: `(x, y)` tuple
+- `aero_mode`: `0` or `1`
+- `reward`: scalar reward
+- `done`: terminal flag
+- `metadata`: includes segment type, lateral demand/limit, turn direction, and reward breakdown
 
-## Workflow
-1. Load track GPS data or track layout
-2. Convert it into track segments
-3. Simulate the vehicle through the track
-4. Define state, action, and reward
-5. Train an RL agent
-6. Compare against baseline strategies
-7. Visualize results
+## Setup Instructions
 
-## Expected Output
-The final system should produce:
-- a simulated track environment
-- lap-by-lap performance results
-- energy deployment and recovery patterns
-- visual plots of the track and agent behavior
+### 1. Install dependencies
 
-## Current Status
-This project is in the planning/building stage.
+From the environment package directory:
 
-## Future Improvements
-- More accurate tire model
-- Better aero modeling
-- Multi-lap race strategy
-- Traffic and overtaking behavior
-- Support for different tracks
+```bash
+cd F1_RL
+uv sync
+```
 
-## Goal
-Create a practical RL environment that models an F1-style car strategy problem in a way that is realistic enough to matter, but simple enough to build and train.
+If you are using pip instead of uv:
+
+```bash
+cd F1_RL
+pip install -e .
+```
+
+### 2. Run the environment server locally
+
+```bash
+cd F1_RL
+uv run --project . server --port 8000
+```
+
+Alternative:
+
+```bash
+cd F1_RL
+python -m F1_RL.server.app --port 8000
+```
+
+### 3. Run the LLM control loop
+
+Configure `.env` in `F1_RL/` with at least:
+
+- `HF_TOKEN` (or `API_KEY`)
+- `MODEL_NAME` (optional, default provided)
+- `API_BASE_URL` (optional, default provided)
+- `ENV_BASE_URL` (for existing server/Space) or `IMAGE_NAME`/`LOCAL_IMAGE_NAME`
+
+Then run:
+
+```bash
+cd F1_RL
+python inference.py
+```
+
+### 4. Validate before submission
+
+```bash
+cd F1_RL
+openenv validate
+```
+
+Optional pre-validation script:
+
+```bash
+cd F1_RL
+bash pre_validation.sh https://<your-space>.hf.space
+```
+
+### 5. Deploy to Hugging Face Spaces
+
+```bash
+cd F1_RL
+openenv push --repo-id <username>/F1_RL
+```
+
+## Project Structure
+
+```text
+RL_Hackathon/
+├── README.md
+└── F1_RL/
+	├── README.md
+	├── openenv.yaml
+	├── pyproject.toml
+	├── models.py
+	├── client.py
+	├── inference.py
+	├── pre_validation.sh
+	└── server/
+		├── app.py
+		├── F1_RL_environment.py
+		├── physics.py
+		├── rewards_updated.py
+		├── track.py
+		└── Melbourne.csv
+```
