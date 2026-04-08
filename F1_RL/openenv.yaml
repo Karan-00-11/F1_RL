@@ -4,4 +4,14 @@ type: space
 runtime: fastapi
 app: server.app:app
 port: 8000
+tasks:
+  - name: completion
+    grader: completion_based_grader
+    description: Lap completion, safety, and resource conservation.
+  - name: energy-efficiency
+    grader: energy_efficiency_grader
+    description: Progress achieved per unit of energy used.
+  - name: consistency
+    grader: consistency_grader
+    description: Stable, physically valid, and strategically consistent control.
 

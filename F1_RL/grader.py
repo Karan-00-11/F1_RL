@@ -57,6 +57,10 @@ class AgentGrader:
 
         return clamp(score)
 
+    def completion_based_grader(self, trajectory: list) -> float:
+        """Compatibility wrapper with corrected method name."""
+        return self.compeletion_based_grader(trajectory)
+
 
     def energy_efficiency_grader(self, trajectory: list) -> float:
         """
