@@ -5,13 +5,13 @@ runtime: fastapi
 app: server.app:app
 port: 8000
 tasks:
-  - name: completion
-    grader: completion_based_grader
-    description: Lap completion, safety, and resource conservation.
-  - name: energy-efficiency
-    grader: energy_efficiency_grader
-    description: Progress achieved per unit of energy used.
-  - name: consistency
-    grader: consistency_grader
-    description: Stable, physically valid, and strategically consistent control.
+  - name: easy
+    grader: easy_grader
+    description: Deterministic completion-focused grading for lap finish and safety basics.
+  - name: medium
+    grader: medium_grader
+    description: Deterministic energy-efficiency grading for progress per energy and phase alignment.
+  - name: hard
+    grader: hard_grader
+    description: Deterministic consistency grading for physics adherence, robustness, and tire management.
 

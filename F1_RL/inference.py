@@ -49,13 +49,13 @@ import re
 import subprocess
 import textwrap
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from models import F1Actions
 from openai import OpenAI
 
 from client import F1EnvClient
-from grader import AgentGrader
+from grader import easy_grader, hard_grader, medium_grader
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).resolve().with_name(".env"), override=False)
@@ -65,7 +65,7 @@ API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
-TASK_NAME = "easy" or "medium" or "hard" or "overall"
+TASK_NAME = os.getenv("TASK", os.getenv("TASK_NAME", "overall"))
 BENCHMARK = os.getenv("BENCHMARK", "my_env_v4")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 AUTO_REUSE_LOCAL_ENV = os.getenv("AUTO_REUSE_LOCAL_ENV", "true").strip().lower() in {
@@ -79,50 +79,59 @@ TEMPERATURE = 0.2
 MAX_TOKENS = 200
 SUCCESS_SCORE_THRESHOLD = 0.1  # normalized score in [0, 1]
 
-# SUPPORTED_TASKS = ("completion", "energy-efficiency", "consistency", "overall")
+TaskGrader = Callable[[List[Dict[str, Any]]], float]
+
+TASK_GRADERS: Dict[str, TaskGrader] = {
+    "easy": easy_grader,
+    "medium": medium_grader,
+    "hard": hard_grader,
+}
 
 
-# def resolve_task_key(task_name: str) -> str:
-#     """Normalize external task names into the supported grader keys."""
-#     task_norm = (task_name or "").strip().lower().replace("_", "-")
+def resolve_task_key(task_name: str) -> str:
+    """Normalize incoming task names into easy/medium/hard/overall."""
+    task_norm = (task_name or "").strip().lower().replace("_", "-")
 
-#     alias_groups = {
-#         "completion": {
-#             "completion",
-#             "lap-completion",
-#             "lap",
-#             "finish",
-#             "safety",
-#         },
-#         "energy-efficiency": {
-#             "energy",
-#             "energy-efficiency",
-#             "efficiency",
-#             "energy-strategy",
-#             "soc",
-#         },
-#         "consistency": {
-#             "consistency",
-#             "stable",
-#             "stability",
-#             "physics",
-#             "control-consistency",
-#         },
-#         "overall": {"overall", "default", "f1-rl", "f1", "echo"},
-#     }
+    alias_groups = {
+        "easy": {
+            "easy",
+            "completion",
+            "lap-completion",
+            "lap",
+            "finish",
+            "safety",
+        },
+        "medium": {
+            "medium",
+            "energy",
+            "energy-efficiency",
+            "efficiency",
+            "energy-strategy",
+            "soc",
+        },
+        "hard": {
+            "hard",
+            "consistency",
+            "stable",
+            "stability",
+            "physics",
+            "control-consistency",
+        },
+        "overall": {"overall", "default", "f1-rl", "f1", "echo"},
+    }
 
-#     for key, aliases in alias_groups.items():
-#         if task_norm in aliases:
-#             return key
+    for key, aliases in alias_groups.items():
+        if task_norm in aliases:
+            return key
 
-#     if any(token in task_norm for token in ("energy", "efficiency", "soc")):
-#         return "energy-efficiency"
-#     if any(token in task_norm for token in ("consistency", "stability", "physics")):
-#         return "consistency"
-#     if any(token in task_norm for token in ("completion", "lap", "finish", "safety")):
-#         return "completion"
+    if any(token in task_norm for token in ("energy", "efficiency", "soc")):
+        return "medium"
+    if any(token in task_norm for token in ("consistency", "stability", "physics")):
+        return "hard"
+    if any(token in task_norm for token in ("completion", "lap", "finish", "safety")):
+        return "easy"
 
-#     return "overall"
+    return "overall"
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
@@ -434,9 +443,8 @@ async def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     env = await create_env_client()
-    grader = AgentGrader()
-    task_name = (TASK_NAME).strip() or "overall"
-    # task_key = resolve_task_key(incoming_task_name)
+    task_name = (TASK_NAME or "").strip() or "overall"
+    task_key = resolve_task_key(task_name)
 
     history: List[str] = []
     rewards: List[float] = []
@@ -445,7 +453,7 @@ async def main() -> None:
     score = 0.0
     success = False
 
-    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_key, env=BENCHMARK, model=MODEL_NAME)
 
     try:
         result = await env.reset() # OpenENV.reset()
@@ -489,18 +497,10 @@ async def main() -> None:
                 break
 
         if trajectory:
-            completion_score = grader.completion_based_grader(trajectory)
-            energy_score = grader.energy_efficiency_grader(trajectory)
-            consistency_score = grader.consistency_grader(trajectory)
-
-            if task_name == "easy":
-                score = completion_score
-            elif task_name == "medium":
-                score = energy_score
-            elif task_name == "hard":
-                score = consistency_score
+            if task_key in TASK_GRADERS:
+                score = TASK_GRADERS[task_key](trajectory)
             else:
-                score = (completion_score + energy_score + consistency_score) / 3.0
+                score = sum(grader_fn(trajectory) for grader_fn in TASK_GRADERS.values()) / float(len(TASK_GRADERS))
         else:
             score = 0.0
 

@@ -5,12 +5,19 @@ def clamp(x, lo=0.0, hi=1.0):
     return float(max(lo, min(hi, x)))
 
 
+def _safe_step_metadata(step: dict) -> dict:
+    return step.get("metadata", {}) if isinstance(step, dict) else {}
+
+
 class AgentGrader:
 
     def compeletion_based_grader(self, trajectory: list) -> float:
         """
         Focus: Did the agent complete the lap safely?
         """
+
+        if not trajectory:
+            return 0.0
 
         total_reward = sum(step["reward"] for step in trajectory)
 
@@ -38,7 +45,7 @@ class AgentGrader:
         # Safety
         penalties = 0
         for step in trajectory:
-            rb = step["metadata"].get("reward_breakdown", {})
+            rb = _safe_step_metadata(step).get("reward_breakdown", {})
             penalties += (
                 abs(rb.get("overlap_penalty", 0)) +
                 abs(rb.get("slip_penalty", 0)) +
@@ -66,13 +73,15 @@ class AgentGrader:
         """
         Focus: Is energy used in correct driving phases?
         """
+        if not trajectory:
+            return 0.0
+
         total_progress = 0.0
         energy_used = 0.0
         phase_alignment_score = 0.0
         stability_penalty = 0.0
 
         for step in trajectory:
-            obs = step["obs"]
             md = step.get("metadata", {})
             rb = md.get("reward_breakdown", {})
 
@@ -124,6 +133,9 @@ class AgentGrader:
         """
         Focus: Is behavior physically AND strategically optimal?
         """
+        if not trajectory:
+            return 0.0
+
         energy_timing_score = 0.0
         physics_violation_penalty = 0.0
         tire_management_score = 0.0
@@ -138,7 +150,6 @@ class AgentGrader:
 
             curvature = obs.curvature_ahead
             soc = obs.battery_state_of_charge
-            speed = obs.speed
 
             # --- Energy timing logic
             # Prefer deploy on low curvature (straights)
@@ -191,6 +202,36 @@ class AgentGrader:
         )
 
         return clamp(score)
+
+
+def completion_based_grader(trajectory: list) -> float:
+    """Module-level grader entrypoint for completion-focused task."""
+    return AgentGrader().completion_based_grader(trajectory)
+
+
+def energy_efficiency_grader(trajectory: list) -> float:
+    """Module-level grader entrypoint for energy-efficiency task."""
+    return AgentGrader().energy_efficiency_grader(trajectory)
+
+
+def consistency_grader(trajectory: list) -> float:
+    """Module-level grader entrypoint for consistency task."""
+    return AgentGrader().consistency_grader(trajectory)
+
+
+def easy_grader(trajectory: list) -> float:
+    """Easy task: prioritize lap completion and safe driving basics."""
+    return completion_based_grader(trajectory)
+
+
+def medium_grader(trajectory: list) -> float:
+    """Medium task: reward efficient energy use aligned with track phases."""
+    return energy_efficiency_grader(trajectory)
+
+
+def hard_grader(trajectory: list) -> float:
+    """Hard task: require stable and physically consistent control behavior."""
+    return consistency_grader(trajectory)
 
 
 # # =========================================================
