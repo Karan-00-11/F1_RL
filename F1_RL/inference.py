@@ -49,13 +49,13 @@ import re
 import subprocess
 import textwrap
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from models import F1Actions
 from openai import OpenAI
 
 from client import F1EnvClient
-from grader import easy_grader, hard_grader, medium_grader
+from grader import TASK_DEFINITIONS, TASK_GRADERS, evaluate_task
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).resolve().with_name(".env"), override=False)
@@ -77,15 +77,7 @@ AUTO_REUSE_LOCAL_ENV = os.getenv("AUTO_REUSE_LOCAL_ENV", "true").strip().lower()
 MAX_STEPS = 100
 TEMPERATURE = 0.2
 MAX_TOKENS = 200
-SUCCESS_SCORE_THRESHOLD = 0.1  # normalized score in [0, 1]
-
-TaskGrader = Callable[[List[Dict[str, Any]]], float]
-
-TASK_GRADERS: Dict[str, TaskGrader] = {
-    "easy": easy_grader,
-    "medium": medium_grader,
-    "hard": hard_grader,
-}
+LLM_ENABLED = True
 
 
 def resolve_task_key(task_name: str) -> str:
@@ -314,6 +306,73 @@ def _sanitize_action_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return action
 
 
+def _rule_based_action_payload(observation: Any) -> Dict[str, Any]:
+    metadata = getattr(observation, "metadata", {}) or {}
+    done = bool(getattr(observation, "done", False))
+    lap_complete = bool(metadata.get("lap_complete", False))
+
+    if done or lap_complete:
+        return _safe_action_payload()
+
+    speed = float(getattr(observation, "speed", 0.0))
+    curvature = float(getattr(observation, "curvature_ahead", 0.0))
+    soc = float(getattr(observation, "battery_state_of_charge", 0.0))
+    segment_type = str(metadata.get("segment_type", "straight")).lower()
+    vmax_seg = float(metadata.get("vmax_segment_mps", max(speed, 1.0)))
+
+    ay_demand = float(metadata.get("lateral_accel_demand", 0.0))
+    ay_limit = float(metadata.get("lateral_accel_limit", 1e-3))
+    lat_ratio = ay_demand / max(ay_limit, 1e-3)
+    v_ratio = speed / max(vmax_seg, 1e-3)
+    corner_risk = segment_type != "straight" or curvature >= 0.008 or lat_ratio >= 0.82
+
+    if corner_risk:
+        brake = _bounded_float(0.18 + 0.55 * max(0.0, v_ratio - 0.85) + 0.70 * max(0.0, lat_ratio - 0.90), 0.0, 1.0)
+        throttle = _bounded_float(0.22 - 0.35 * max(0.0, lat_ratio - 0.90), 0.0, 0.40)
+        steering_mag = _bounded_float(0.12 + 0.55 * max(0.0, lat_ratio - 0.75), 0.10, 0.85)
+        turn_direction = str(metadata.get("turn_direction", "straight")).lower()
+        if turn_direction == "left":
+            steering = -steering_mag
+        elif turn_direction == "right":
+            steering = steering_mag
+        else:
+            steering = 0.0
+
+        payload = {
+            "throttle": throttle,
+            "brake": brake,
+            "steering": steering,
+            "regen_intensity": _bounded_float(0.25 + 0.75 * brake, 0.0, 1.0),
+            "deploy_level": 0.0,
+            "battery_status": "REGEN",
+        }
+        return _sanitize_action_payload(payload)
+
+    if v_ratio < 0.85:
+        throttle = 1.0
+    elif v_ratio < 0.95:
+        throttle = 0.85
+    else:
+        throttle = 0.60
+
+    if soc > 0.12 and v_ratio < 0.98:
+        status = "DEPLOY"
+        deploy = _bounded_float(0.55 + 0.35 * (1.0 - v_ratio), 0.55, 1.0)
+    else:
+        status = "NEUTRAL"
+        deploy = 0.0
+
+    payload = {
+        "throttle": throttle,
+        "brake": 0.0,
+        "steering": 0.0,
+        "regen_intensity": 0.0,
+        "deploy_level": deploy,
+        "battery_status": status,
+    }
+    return _sanitize_action_payload(payload)
+
+
 def build_user_prompt(step: int, observation: Any, history: List[str]) -> str:
     metadata = getattr(observation, "metadata", {}) or {}
     obs_payload = {
@@ -359,6 +418,14 @@ def get_model_action(
     observation: Any,
     history: List[str],
 ) -> tuple[F1Actions, str, Optional[str]]:
+    global LLM_ENABLED
+
+    if not LLM_ENABLED:
+        fallback_payload = _rule_based_action_payload(observation)
+        action = F1Actions(**fallback_payload)
+        action_json = json.dumps(fallback_payload, separators=(",", ":"))
+        return action, action_json, "llm_unavailable_fallback"
+
     user_prompt = build_user_prompt(step, observation, history)
     parse_error: Optional[str] = None
 
@@ -377,7 +444,11 @@ def get_model_action(
         action_payload = _sanitize_action_payload(_extract_json_object(raw_text))
     except Exception as exc:
         parse_error = f"{type(exc).__name__}: {exc}"
-        action_payload = _safe_action_payload()
+        action_payload = _rule_based_action_payload(observation)
+
+        # Disable repeated provider calls when token/credits/auth/network is failing.
+        if any(token in parse_error.lower() for token in ("apistatuserror", "401", "402", "invalid", "unauthorized", "quota", "depleted")):
+            LLM_ENABLED = False
 
     action = F1Actions(**action_payload)
     action_json = json.dumps(action_payload, separators=(",", ":"))
@@ -426,7 +497,6 @@ async def create_env_client() -> F1EnvClient:
             try:
                 env = F1EnvClient(base_url=base_url, connect_timeout_s=0.8)
                 await env.connect()
-                print(f"[DEBUG] Reusing running env server at {base_url}", flush=True)
                 return env
             except Exception:
                 continue
@@ -439,12 +509,8 @@ async def create_env_client() -> F1EnvClient:
     return await F1EnvClient.from_docker_image(IMAGE_NAME)
 
 
-async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
+async def run_task_episode(client: OpenAI, task_key: str) -> Dict[str, Any]:
     env = await create_env_client()
-    task_name = (TASK_NAME or "").strip() or "overall"
-    task_key = resolve_task_key(task_name)
 
     history: List[str] = []
     rewards: List[float] = []
@@ -498,21 +564,50 @@ async def main() -> None:
 
         if trajectory:
             if task_key in TASK_GRADERS:
-                score = TASK_GRADERS[task_key](trajectory)
+                task_result = evaluate_task(task_key, trajectory)
+                score = float(task_result["score"])
+                success = bool(task_result["passed"])
             else:
-                score = sum(grader_fn(trajectory) for grader_fn in TASK_GRADERS.values()) / float(len(TASK_GRADERS))
+                per_task_results = [
+                    evaluate_task(task, trajectory)
+                    for task in TASK_DEFINITIONS.keys()
+                ]
+                score = sum(float(item["score"]) for item in per_task_results) / float(len(per_task_results))
+                success = all(bool(item["passed"]) for item in per_task_results)
         else:
             score = 0.0
+            success = False
 
         score = min(max(score, 0.0), 1.0)
-        success = score >= SUCCESS_SCORE_THRESHOLD
 
     finally:
         try:
             await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
+        except Exception:
+            pass
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return {
+        "task": task_key,
+        "score": score,
+        "success": success,
+        "steps": steps_taken,
+        "rewards": rewards,
+    }
+
+
+async def main() -> None:
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    task_name = (TASK_NAME or "").strip() or "overall"
+    task_key = resolve_task_key(task_name)
+
+    if task_key in TASK_GRADERS:
+        await run_task_episode(client, task_key)
+        return
+
+    # In overall mode, run and grade all three tasks separately.
+    for per_task in ("easy", "medium", "hard"):
+        await run_task_episode(client, per_task)
 
 
 if __name__ == "__main__":

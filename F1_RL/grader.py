@@ -9,6 +9,34 @@ def _safe_step_metadata(step: dict) -> dict:
     return step.get("metadata", {}) if isinstance(step, dict) else {}
 
 
+def _lap_complete(trajectory: list) -> bool:
+    if not trajectory:
+        return False
+    return bool(_safe_step_metadata(trajectory[-1]).get("lap_complete", False))
+
+
+def _avg_progress_reward(trajectory: list) -> float:
+    if not trajectory:
+        return 0.0
+    total = 0.0
+    for step in trajectory:
+        rb = _safe_step_metadata(step).get("reward_breakdown", {})
+        total += float(rb.get("progress_reward", 0.0))
+    return total / float(len(trajectory))
+
+
+def _avg_physics_overshoot(trajectory: list) -> float:
+    if not trajectory:
+        return 0.0
+    overshoot = 0.0
+    for step in trajectory:
+        md = _safe_step_metadata(step)
+        ay_demand = float(md.get("lateral_accel_demand", 0.0))
+        ay_limit = float(md.get("lateral_accel_limit", 1e-6))
+        overshoot += max(0.0, ay_demand - ay_limit)
+    return overshoot / float(len(trajectory))
+
+
 class AgentGrader:
 
     def compeletion_based_grader(self, trajectory: list) -> float:
@@ -232,6 +260,73 @@ def medium_grader(trajectory: list) -> float:
 def hard_grader(trajectory: list) -> float:
     """Hard task: require stable and physically consistent control behavior."""
     return consistency_grader(trajectory)
+
+
+TASK_GRADERS = {
+    "easy": easy_grader,
+    "medium": medium_grader,
+    "hard": hard_grader,
+}
+
+
+TASK_DEFINITIONS = {
+    "easy": {
+        "id": "easy_lap_completion",
+        "difficulty": "easy",
+        "objective": "Complete the lap safely while preserving SOC and tire condition.",
+        "pass_threshold": 0.55,
+        "pass_criteria": "lap_complete is true and score >= 0.55",
+    },
+    "medium": {
+        "id": "medium_energy_strategy",
+        "difficulty": "medium",
+        "objective": "Use energy in the correct phase while maintaining lap progress and stability.",
+        "pass_threshold": 0.50,
+        "pass_criteria": "lap_complete is true, avg_progress_reward > 0, and score >= 0.50",
+    },
+    "hard": {
+        "id": "hard_consistency_control",
+        "difficulty": "hard",
+        "objective": "Sustain physically consistent and robust control under racing constraints.",
+        "pass_threshold": 0.50,
+        "pass_criteria": "lap_complete is true, avg_physics_overshoot <= 0.25, and score >= 0.50",
+    },
+}
+
+
+def evaluate_task(task_key: str, trajectory: list) -> dict:
+    """Return deterministic score + pass/fail evaluation for one task."""
+    task = (task_key or "").strip().lower()
+    if task not in TASK_GRADERS:
+        raise ValueError(f"Unsupported task_key: {task_key}")
+
+    task_def = TASK_DEFINITIONS[task]
+    score = clamp(TASK_GRADERS[task](trajectory))
+    lap_complete = _lap_complete(trajectory)
+    avg_progress_reward = _avg_progress_reward(trajectory)
+    avg_physics_overshoot = _avg_physics_overshoot(trajectory)
+
+    threshold = float(task_def["pass_threshold"])
+    if task == "easy":
+        passed = lap_complete and score >= threshold
+    elif task == "medium":
+        passed = lap_complete and avg_progress_reward > 0.0 and score >= threshold
+    else:
+        passed = lap_complete and avg_physics_overshoot <= 0.25 and score >= threshold
+
+    return {
+        "task": task,
+        "task_id": task_def["id"],
+        "score": score,
+        "passed": bool(passed),
+        "pass_threshold": threshold,
+        "pass_criteria": task_def["pass_criteria"],
+        "details": {
+            "lap_complete": lap_complete,
+            "avg_progress_reward": avg_progress_reward,
+            "avg_physics_overshoot": avg_physics_overshoot,
+        },
+    }
 
 
 # # =========================================================

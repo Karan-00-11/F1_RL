@@ -5,3 +5,4 @@ src/envs/F1_26
 .env
 *.egg-info
 F1_RL/README.md
+F1_RL/dummy_inference.py
